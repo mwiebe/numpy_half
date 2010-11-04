@@ -249,23 +249,28 @@ static int HALF_setitem(PyObject *op, char *ov, PyArrayObject *ap)
 
 }
 
-#define HLT(a,b) (_half_lt(a, b) || (_half_isnan(b) && !_half_isnan(a)))
-
 static int
 HALF_compare (npy_half *pa, npy_half *pb, PyArrayObject *NPY_UNUSED(ap))
 {
     npy_half a = *pa, b = *pb;
+    npy_bool anan, bnan;
     int ret;
 
-    if (HLT(a,b)) {
-        ret = -1;
-    }
-    else if (HLT(b,a)) {
+    anan = _half_isnan(a);
+    bnan = _half_isnan(b);
+
+    if (anan) {
+        ret = bnan ? 0 : -1;
+    } else if (bnan) {
         ret = 1;
-    }
-    else {
+    } else if(_half_lt_nonan(a, b)) {
+        ret = -1;
+    } else if(_half_lt_nonan(b, a)) {
+        ret = 1;
+    } else {
         ret = 0;
     }
+
     return ret;
 }
 
