@@ -88,25 +88,96 @@ def test_half_correctness():
        code and compares it to the dtype conversion"""
     # Create an array of all possible 16-bit values
     a = np.arange(0x10000, dtype=np.uint16)
-    a_f16 = a.copy()
-    a_f16.dtype = h.float16
+    a_f16 = a.view(dtype=h.float16)
     # Convert to 32-bit and 64-bit float with the numpy machinery
-    a_f32 = np.array(a_f16, dtype=np.float32)
-    a_f64 = np.array(a_f16, dtype=np.float64)
-    # Compare to hand-built values for each finite value
-    for i in a:
-        sgn = (i&0x8000) >> 15
-        exp = (i&0x7c00) >> 10
-        man = (i&0x03ff)
-        if exp != 31: # Skip inf and NaN
-            if exp == 0:
-                man = man * 2**(-10)
-                exp = -14
-            else:
-                man = (0x0400+man) * 2**(-10)
-                exp = exp - 15
+    a_f32 = np.array(a_f16, dtype=float32)
+    a_f64 = np.array(a_f16, dtype=float64)
 
-            val = (-1.0)**sgn * man * 2.0**exp
-            assert_equal(a_f16[i], val, "Half value 0x%x isn't correct" % i)
-            assert_equal(a_f32[i], val, "Half value 0x%x isn't correct" % i)
-            assert_equal(a_f64[i], val, "Half value 0x%x isn't correct" % i)
+    # Convert to 64-bit float manually
+    a_sgn = (-1.0)**((a&0x8000) >> 15)
+    a_exp = np.array((a&0x7c00) >> 10, dtype=np.int32) - 15
+    a_man = (a&0x03ff) * 2.0**(-10)
+    # Implicit bit of normalized floats
+    a_man[a_exp!=-15] += 1
+    # Denormalized exponent is -14
+    a_exp[a_exp==-15] = -14
+
+    a_manual = a_sgn * a_man * 2.0**a_exp
+
+    a32_fail = np.nonzero(a_f32 != a_manual)[0]
+    if len(a32_fail) != 0:
+        bad_index = a32_fail[0]
+        assert_equal(a_f32, a_manual,
+             "First non-equal is half value %x -> %g != %g" %
+                        (a[bad_index], a_f32[bad_index], a_manual[bad_index]))
+
+    a64_fail = np.nonzero(a_f64 != a_manual)[0]
+    if len(a64_fail) != 0:
+        bad_index = a64_fail[0]
+        assert_equal(a_f64, a_manual,
+             "First non-equal is half value %x -> %g != %g" %
+                        (a[bad_index], a_f64[bad_index], a_manual[bad_index]))
+
+def test_half_ordering():
+    """Make sure comparisons are working right"""
+
+    # Create an array of all non-NaN float16s
+    a = np.arange(0x10000, dtype=uint16)
+    a = a[np.nonzero(np.bitwise_or((a&0x7c00) != 0x7c00, (a&0x03ff) == 0x0000))]
+    a.dtype = float16
+
+    # 32-bit float copy
+    b = np.array(a, dtype=float32)
+
+    # Should sort the same
+    a.sort()
+    b.sort()
+    assert_equal(a, b)
+
+    # Comparisons should work
+    assert_((a[:-1] <= a[1:]).all())
+    assert_(not (a[:-1] > a[1:]).any())
+    assert_((a[1:] >= a[:-1]).all())
+    assert_(not (a[1:] < a[:-1]).any())
+    # All != except for +/-0
+    assert_equal(np.nonzero(a[:-1] < a[1:])[0].size, a.size-2)
+    assert_equal(np.nonzero(a[1:] > a[:-1])[0].size, a.size-2)
+
+def test_half_funcs():
+    """Test the various ArrFuncs"""
+
+    # fill
+    assert_equal(np.arange(10, dtype=float16),
+                 np.arange(10, dtype=float32))
+
+    # fillwithscalar
+    a = np.zeros((5,), dtype=float16)
+    a.fill(1)
+    assert_equal(a, np.ones((5,), dtype=float16))
+    
+    # nonzero and copyswap
+    a = np.array([0,0,-1,-1/1e20,0,2.0**-24, 7.629e-6], dtype=float16)
+    assert_equal(a.nonzero()[0],
+                 [2,5,6])
+    a = a.byteswap().newbyteorder()
+    assert_equal(a.nonzero()[0],
+                 [2,5,6])
+
+    # dot
+    a = np.arange(0, 10, 0.5, dtype=float16)
+    b = np.ones((20,), dtype=float16)
+    assert_equal(np.dot(a,b),
+                 95)
+    
+    # argmax
+    a = np.array([0, -np.inf, -2, 0.5, 12.55, 7.3, 2.1, 12.4], dtype=float16)
+    assert_equal(a.argmax(),
+                 4)
+    a = np.array([0, -np.inf, -2, np.inf, 12.55, np.nan, 2.1, 12.4], dtype=float16)
+    assert_equal(a.argmax(),
+                 5)
+
+    # getitem
+    a = np.arange(10, dtype=float16)
+    for i in range(10):
+        assert_equal(a.item(i),i)

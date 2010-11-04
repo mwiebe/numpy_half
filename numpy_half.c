@@ -40,6 +40,88 @@ typedef struct {
         npy_half obval;
 } PyHalfScalarObject;
 
+static float _half_to_float(npy_half h)
+{
+    float ret;
+    *((npy_uint32*)&ret) = halfbits_to_floatbits(h);
+    return ret;
+}
+
+static double _half_to_double(npy_half h)
+{
+    double ret;
+    *((npy_uint64*)&ret) = halfbits_to_doublebits(h);
+    return ret;
+}
+
+static npy_half _float_to_half(float f)
+{
+    return floatbits_to_halfbits(*((npy_uint32*)&f));
+}
+
+static npy_half _double_to_half(double d)
+{
+    return doublebits_to_halfbits(*((npy_uint64*)&d));
+}
+
+static int _half_isnan(npy_half h)
+{
+    return ((h&0x7c00u) == 0x7c00u) && ((h&0x03ffu) != 0x0000u);
+}
+
+static int _half_lt_nonan(npy_half h1, npy_half h2)
+{
+    if (h1&0x8000u) {
+        if (h2&0x8000u) {
+            return (h1&0x7fffu) > (h2&0x7fffu);
+        } else {
+            /* Signed zeros are equal, have to check for it */
+            return (h1 != 0x8000u) || (h2 != 0x0000u);
+        }
+    } else {
+        if (h2&0x8000u) {
+            return 0;
+        } else {
+            return (h1&0x7fffu) < (h2&0x7fffu);
+        }
+    }
+}
+
+static int _half_lt(npy_half h1, npy_half h2)
+{
+    if (_half_isnan(h1) || _half_isnan(h2)) {
+        return 0;
+    } else {
+        return _half_lt_nonan(h1, h2);
+    }
+}
+
+static int _half_le_nonan(npy_half h1, npy_half h2)
+{
+    if (h1&0x8000u) {
+        if (h2&0x8000u) {
+            return (h1&0x7fffu) >= (h2&0x7fffu);
+        } else {
+            return 1;
+        }
+    } else {
+        if (h2&0x8000u) {
+            /* Signed zeros are equal, have to check for it */
+            return (h1 == 0x0000u) && (h2 == 0x8000u);
+        } else {
+            return (h1&0x7fffu) <= (h2&0x7fffu);
+        }
+    }
+}
+static int _half_le(npy_half h1, npy_half h2)
+{
+    if (_half_isnan(h1) || _half_isnan(h2)) {
+        return 0;
+    } else {
+        return _half_le_nonan(h1, h2);
+    }
+}
+
 PyTypeObject PyHalfArrType_Type = {
 #if defined(NPY_PY3K)
     PyVarObject_HEAD_INIT(NULL, 0)
@@ -108,7 +190,6 @@ static npy_half
 MyPyFloat_AsHalf(PyObject *obj)
 {
     double d;
-    npy_uint64 dbits;
     PyObject *num;
 
     if (obj == Py_None) {
@@ -122,30 +203,23 @@ MyPyFloat_AsHalf(PyObject *obj)
             Py_DECREF(num);
         }
     }
-    /*
-     * Was having some trouble getting the bits of 'd',
-     * possibly a gcc compiler optimization bug?
-     * This memcpy makes it work.
-     */
-    memcpy(&dbits, &d, 8);
-    return doublebits_to_halfbits(dbits);
+    return _double_to_half(d);
 }
 
 static PyObject *
 HALF_getitem(char *ip, PyArrayObject *ap)
 {
     npy_half t1;
-    npy_uint64 t2;
+    double t2;
 
     if ((ap == NULL) || PyArray_ISBEHAVED_RO(ap)) {
         t1 = *((npy_half *)ip);
-        t2 = halfbits_to_doublebits(t1);
     }
     else {
         ap->descr->f->copyswap(&t1, ip, !PyArray_ISNOTSWAPPED(ap), ap);
-        t2 = halfbits_to_doublebits(t1);
     }
-    return PyFloat_FromDouble(*((double*)&t2));
+    t2 = _half_to_double(t1);
+    return PyFloat_FromDouble(t2);
 }
 
 static int HALF_setitem(PyObject *op, char *ov, PyArrayObject *ap)
@@ -175,20 +249,129 @@ static int HALF_setitem(PyObject *op, char *ov, PyArrayObject *ap)
 
 }
 
-static void
-HALF_copyswap (void *dst, void *src, int swap, void *NPY_UNUSED(arr))
+#define HLT(a,b) (_half_lt(a, b) || (_half_isnan(b) && !_half_isnan(a)))
+
+static int
+HALF_compare (npy_half *pa, npy_half *pb, PyArrayObject *NPY_UNUSED(ap))
 {
+    npy_half a = *pa, b = *pb;
+    int ret;
 
-    if (src != NULL) {
-        /* copy first if needed */
-        memcpy(dst, src, 2);
+    if (HLT(a,b)) {
+        ret = -1;
     }
-    if (swap) {
-        char *a, *b, c;
+    else if (HLT(b,a)) {
+        ret = 1;
+    }
+    else {
+        ret = 0;
+    }
+    return ret;
+}
 
-        a = (char *)dst;
-        b = a + 1;
-        c = *a; *a++ = *b; *b = c;
+static int
+HALF_argmax(npy_half *ip, npy_intp n, npy_intp *max_ind, PyArrayObject *NPY_UNUSED(aip))
+{
+    npy_intp i;
+    npy_half mp = *ip;
+
+    *max_ind = 0;
+
+    if (_half_isnan(mp)) {
+        /* nan encountered; it's maximal */
+        return 0;
+    }
+
+    for (i = 1; i < n; i++) {
+        ip++;
+        /*
+         * Propagate nans, similarly as max() and min()
+         */
+        if (!(_half_le(*ip, mp))) {  /* negated, for correct nan handling */
+            mp = *ip;
+            *max_ind = i;
+            if (_half_isnan(mp)) {
+                /* nan encountered, it's maximal */
+                break;
+            }
+        }
+    }
+    return 0;
+}
+
+static void
+HALF_dot(char *ip1, npy_intp is1, char *ip2, npy_intp is2, char *op, npy_intp n,
+           void *NPY_UNUSED(ignore))
+{
+    float tmp = 0.0f;
+    npy_intp i;
+
+    for (i = 0; i < n; i++, ip1 += is1, ip2 += is2) {
+        tmp += _half_to_float(*((npy_half *)ip1)) *
+               _half_to_float(*((npy_half *)ip2));
+    }
+    *((npy_half *)op) = _float_to_half(tmp);
+}
+
+/*
+ * NumPyOS isn't exported, so skipping scan and fromstr
+static int
+HALF_scan(FILE *fp, npy_half *ip, void *NPY_UNUSED(ignore), PyArray_Descr *NPY_UNUSED(ignored))
+{
+    double result;
+    int ret;
+
+    ret = NumPyOS_ascii_ftolf(fp, &result);
+    *ip = _double_to_half(result);
+    return ret;
+}
+
+static int
+HALF_fromstr(char *str, npy_half *ip, char **endptr, PyArray_Descr *NPY_UNUSED(ignore))
+{
+    double result;
+
+    result = NumPyOS_ascii_strtod(str, endptr);
+    *ip = _double_to_half(result);
+    return 0;
+}
+*/
+
+static npy_bool
+HALF_nonzero (char *ip, PyArrayObject *ap)
+{
+    if (ap == NULL || PyArray_ISBEHAVED_RO(ap)) {
+        npy_half *ptmp = (npy_half *)ip;
+        return (npy_bool) (((*ptmp)&0x7fff) != 0);
+    }
+    else {
+        npy_half tmp;
+        ap->descr->f->copyswap(&tmp, ip, !PyArray_ISNOTSWAPPED(ap), ap);
+        return (npy_bool) ((tmp&0x7fff) != 0);
+    }
+}
+
+static void
+HALF_fill(npy_half *buffer, npy_intp length, void *NPY_UNUSED(ignored))
+{
+    npy_intp i;
+    float start = _half_to_float(buffer[0]);
+    float delta = _half_to_float(buffer[1]);
+
+    delta -= start;
+    for (i = 2; i < length; ++i) {
+        buffer[i] = _float_to_half(start + i*delta);
+    }
+}
+
+static void
+HALF_fillwithscalar(npy_half *buffer, npy_intp length, npy_half *value, void *NPY_UNUSED(ignored))
+{
+    npy_intp i;
+    npy_half val = *value;
+
+    for (i = 0; i < length; ++i) {
+        buffer[i] = val;
     }
 }
 
@@ -349,11 +532,11 @@ static void                                                                    \
 TYPE ## _to_HALF(type *ip, npy_half *op, npy_intp n,                           \
                PyArrayObject *NPY_UNUSED(aip), PyArrayObject *NPY_UNUSED(aop)) \
 {                                                                              \
-    npy_uint32 temp;                                                           \
+    float temp;                                                                \
                                                                                \
     while (n--) {                                                              \
-        *((float*)&temp) = (float)(*ip++);                                     \
-        *op++ = floatbits_to_halfbits(temp);                                   \
+        temp = (float)(*ip++);                                                 \
+        *op++ = _float_to_half(temp);                                          \
     }                                                                          \
 }
 
@@ -409,27 +592,27 @@ gentype_richcompare(PyObject *self, PyObject *other, int cmp_op)
 static long
 halftype_hash(PyObject *obj)
 {
-    npy_uint64 temp;
-    temp = halfbits_to_doublebits(((PyHalfScalarObject *)obj)->obval);
+    double temp;
+    temp = _half_to_double(((PyHalfScalarObject *)obj)->obval);
     return _Py_HashDouble(*((double*)&temp));
 }
 
 PyObject* halftype_repr(PyObject *o)
 {
-    npy_uint64 temp;
+    double temp;
     char str[48];
 
-    temp = halfbits_to_doublebits(((PyHalfScalarObject *)o)->obval);
+    temp = _half_to_double(((PyHalfScalarObject *)o)->obval);
     sprintf(str, "float16(%g)", *((double*)&temp));
     return PyString_FromString(str);
 }
 
 PyObject* halftype_str(PyObject *o)
 {
-    npy_uint64 temp;
+    double temp;
     char str[48];
 
-    temp = halfbits_to_doublebits(((PyHalfScalarObject *)o)->obval);
+    temp = _half_to_double(((PyHalfScalarObject *)o)->obval);
     sprintf(str, "%g", *((double*)&temp));
     return PyString_FromString(str);
 }
@@ -442,6 +625,7 @@ PyMODINIT_FUNC initnumpy_half(void)
 {
     PyObject *m;
     int halfNum;
+    PyArray_Descr *descr;
 
     m = Py_InitModule("numpy_half", HalfMethods);
     if (m == NULL) {
@@ -473,7 +657,21 @@ PyMODINIT_FUNC initnumpy_half(void)
     PyArray_InitArrFuncs(&_PyHalf_ArrFuncs);
     _PyHalf_ArrFuncs.getitem = (PyArray_GetItemFunc*)HALF_getitem;
     _PyHalf_ArrFuncs.setitem = (PyArray_SetItemFunc*)HALF_setitem;
-    _PyHalf_ArrFuncs.copyswap = (PyArray_CopySwapFunc*)HALF_copyswap;
+    /* copy copyswap and copyswapn from uint16 */
+    descr = PyArray_DescrFromType(NPY_UINT16);
+    _PyHalf_ArrFuncs.copyswap = descr->f->copyswap;
+    _PyHalf_ArrFuncs.copyswapn = descr->f->copyswapn;
+    Py_DECREF(descr);
+    _PyHalf_ArrFuncs.compare = (PyArray_CompareFunc*)HALF_compare;
+    _PyHalf_ArrFuncs.argmax = (PyArray_ArgFunc*)HALF_argmax;
+    _PyHalf_ArrFuncs.dotfunc = (PyArray_DotFunc*)HALF_dot;
+    /*
+    _PyHalf_ArrFuncs.scanfunc = (PyArray_ScanFunc*)HALF_scan;
+    _PyHalf_ArrFuncs.fromstr = (PyArray_FromStrFunc*)HALF_fromstr;
+    */
+    _PyHalf_ArrFuncs.nonzero = (PyArray_NonzeroFunc*)HALF_nonzero;
+    _PyHalf_ArrFuncs.fill = (PyArray_FillFunc*)HALF_fill;
+    _PyHalf_ArrFuncs.fillwithscalar = (PyArray_FillWithScalarFunc*)HALF_fillwithscalar;
     _PyHalf_ArrFuncs.cast[NPY_BOOL] = (PyArray_VectorUnaryFunc*)HALF_to_BOOL;
     _PyHalf_ArrFuncs.cast[NPY_BYTE] = (PyArray_VectorUnaryFunc*)HALF_to_BYTE;
     _PyHalf_ArrFuncs.cast[NPY_UBYTE] = (PyArray_VectorUnaryFunc*)HALF_to_UBYTE;
