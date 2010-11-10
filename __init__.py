@@ -5,7 +5,11 @@ __all__ = ['float16']
 import numpy
 from numpy_half import float16
 
+if numpy.__dict__.get('float16') is not None:
+    raise RuntimeError('The NumPy package already has a half/float16 type')
+
 # Add float16 into the numpy module space
+numpy.half = float16
 numpy.float16 = float16
 
 def add_to_typeDict():

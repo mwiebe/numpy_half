@@ -1,6 +1,5 @@
 import numpy as np
-from half import float16
-from numpy import uint16, float32, float64
+from numpy import uint16, float16, float32, float64
 from numpy.testing import *
 
 import warnings
@@ -71,19 +70,23 @@ def test_half_values():
 
 def test_half_rounding():
     """Checks that rounding when converting to half is correct"""
-    a = np.array([2.0**(-25),  # Rounds to minimum denormalized
-                  2.0**(-26),  # Underflows to zero
-                  1.0+2.0**(-11), # rounds to 1.0+2**(-10)
-                  1.0+2.0**(-12), # rounds to 1.0
+    a = np.array([2.0**-25 + 2.0**-35,  # Rounds to minimum denormalized
+                  2.0**-25,       # Underflows to zero (nearest even mode)
+                  2.0**-26,       # Underflows to zero
+                  1.0+2.0**-11 + 2.0**-16, # rounds to 1.0+2**(-10)
+                  1.0+2.0**-11,   # rounds to 1.0 (nearest even mode)
+                  1.0+2.0**-12,   # rounds to 1.0
                   65519,          # rounds to 65504
                   65520],         # rounds to inf
                   dtype=float64)
-    rounded = [2.0**(-24),
-                     0.0,
-                     1.0+2.0**(-10),
-                     1.0,
-                     65504,
-                     np.inf]
+    rounded = [2.0**-24,
+               0.0,
+               0.0,
+               1.0+2.0**(-10),
+               1.0,
+               1.0,
+               65504,
+               np.inf]
 
     # Check float64->float16 rounding
     b = np.array(a, dtype=float16)
